@@ -93,20 +93,9 @@ def build_features(data: PredictionInput) -> pd.DataFrame:
     return df
 
 
-@app.get("/health")
-def health():
-    return {"status": "healthy", "model_loaded": MODEL is not None}
-
-
-@app.get("/model_info")
-def model_info():
-    if MODEL is None:
-        raise HTTPException(503, "Модель не загружена")
-    return {
-        "type": type(MODEL).__name__,
-        "n_features": len(FEATURE_NAMES),
-        "has_scaler": SCALER is not None,
-    }
+@app.get("/test")
+def test():
+    return {"status": "work", "model_loaded": MODEL is not None}
 
 
 @app.post("/predict", response_model=PredictionOutput)
@@ -119,7 +108,7 @@ def predict(data: PredictionInput):
 
     X = build_features(data)
     raw_log = float(MODEL.predict(X)[0])
-    price = float(np.expm1(raw_log))          # ← обратно из лога
+    price = float(np.expm1(raw_log))
 
     if hasattr(MODEL, "estimators_"):
         tree_logs = np.array([t.predict(X)[0] for t in MODEL.estimators_])

@@ -1,7 +1,10 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import requests
 from pathlib import Path
+
+API_URL = "http://127.0.0.1:8000/predict"
 
 st.set_page_config(
     page_title="Прогноз недвижимости",
@@ -13,10 +16,27 @@ tab1, tab2, tab3 = st.tabs(["Прогноз", "Дашборд", "Справка"
 
 @st.cache_data
 def load_data():
-    path = Path("data/df1.pkl")
+    path = Path(__file__).parent / "data_for_modeling.pkl"
     if not path.exists():
+        st.error(f"Файл не найден: {path}")
         return None
-    return pd.read_pickle(path)
+
+    bundle = pd.read_pickle(path)
+    X_test_scaled = bundle["X_test_scaled"].copy()
+    y_test = bundle["y_test"]
+    scaler = bundle.get("scaler")
+    continuous_cols = bundle.get("continuous_cols", [])
+
+    # Разворачиваем scaled обратно в сырые
+    if scaler is not None and continuous_cols:
+        cols = [c for c in continuous_cols if c in X_test_scaled.columns]
+        if cols:
+            X_test_scaled[cols] = scaler.inverse_transform(X_test_scaled[cols])
+
+    # Цена обратно в TRY
+    X_test_scaled["price"] = np.expm1(y_test.values)
+
+    return X_test_scaled
 
 df = load_data()
 
@@ -55,41 +75,52 @@ with tab1:
         if floor_no > total_floor_count and floor_no > 0:
             st.error("Этаж не может быть выше этажности дома")
         else:
-            # Заглушка
-            base_price = size * 15000
-            age_factor = max(0.5, 1 - building_age * 0.02)
-            floor_factor = 1 + 0.02 * max(0, floor_no)
-            room_factor = 1 + 0.03 * room_total
-            listing_factor = {1: 1.0, 2: 0.3, 3: 0.7}[listing_type]
+            payload = {
+                "size": float(size),
+                "room_total": int(room_total),
+                "building_age": int(building_age),
+                "floor_no": int(floor_no),
+                "total_floor_count": int(total_floor_count),
+                "listing_type": int(listing_type),
+                "subtype": sub_type,
+                "heating": heating_type,
+                "tom": int(tom),
+            }
 
-            predicted = base_price * age_factor * floor_factor * room_factor * listing_factor
+            try:
+                with st.spinner(""):
+                    response = requests.post(API_URL, json=payload, timeout=10)
+                    response.raise_for_status()
+                    result = response.json()
 
-            st.success(f"### Прогнозируемая стоимость: **{predicted:,.0f} TRY**")
-            st.write(f"Диапазон: {predicted * 0.85:,.0f} - {predicted * 1.15:,.0f} TRY")
-
-            st.info("Это демонстрационный расчёт. Реальная модель будет подключена позже.")
-
+                st.success(f" Прогнозируемая стоимость: {result['price']:,.0f} TRY")
+                st.write(f"Диапазон: {result['range_low']:,.0f} - {result['range_high']:,.0f} TRY")
+                st.write(f"Цена за м²: {result['price_per_m2']:,.0f} TRY")
+                st.caption(f"Модель: {result['model_type']}")
+            except Exception as e:
+                st.error(f"Что-то пошло не так: {e}")
 with tab2:
-    st.subheader("Статистика")
+    st.subheader("Дашборд")
 
     if df is None:
-        st.error("Данные не найдены.")
+        st.error("Файл data_for_modeling.pkl не найден")
     else:
-        st.success(f"Загружено {len(df):,} ")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Средняя цена", f"{df['price'].mean():,.0f} TRY")
+        c2.metric("Медианная цена", f"{df['price'].median():,.0f} TRY")
+        c3.metric("Средняя площадь", f"{np.expm1(df['size_log']).mean():.1f} м²")
 
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Средняя цена", f"{df['price'].mean():,.0f} TRY")
-        col2.metric("Медианная цена", f"{df['price'].median():,.0f} TRY")
-        col3.metric("Средняя площадь", f"{df['size'].mean():.1f} М2")
-        col4.metric("Средний возраст", f"{df['building_age'].mean():.1f} лет")
+        st.write("### Цена от площади")
+        sample = pd.DataFrame({
+            "Площадь": np.expm1(df['size_log']),
+            "Цена": df['price'],
+        }).dropna().sample(min(500, len(df)), random_state=42)
+        st.scatter_chart(sample, x="Площадь", y="Цена")
 
-        st.subheader("Распределение цены")
-        st.bar_chart(df['price'].head(100).reset_index(drop=True))
-
-        st.markdown("---")
-
-        st.subheader("Первые 20 строк")
-        st.dataframe(df.head(20))
+        if 'room_total' in df.columns:
+            st.write("### Средняя цена по комнатам")
+            by_rooms = df.groupby(df['room_total'].round())['price'].mean()
+            st.bar_chart(by_rooms)
 
 with tab3:
     st.subheader("Справка")
@@ -111,7 +142,7 @@ with tab3:
     st.write("Отопление - тип отопления")
     st.write("Срок размещения - дней на рынке")
 
-    st.write("Тип: Random Forest (заглушка)")
+    st.write("Тип: RandomForestRegressor")
     st.write("Данные: ~251 000 объектов")
     st.write("Признаков: 39")
 
